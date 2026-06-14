@@ -330,6 +330,252 @@ const QC = { major:"#5FE3D8", minor:"#BCA4FF", dom:"#FFB224", dim:"#FF8A8A", aug
 const qc = (q) => QC[q] || "#5FE3D8";
 
 // ═══════════════════════════════════════════════════════════
+// VOICING GENERATOR
+// For standard tuning: a library of common moveable shapes
+// (open + CAGED/barre forms) transposed to the chord root.
+// For other tunings: a stricter algorithmic fallback.
+// Each voicing: { frets:{stringIdx:fret}, muted:[stringIdx], minFret, name }
+// ═══════════════════════════════════════════════════════════
+
+const STD_TUNING = ["E","A","D","G","B","E"];
+
+// Interval name from semitone distance above root
+function intervalName(semis) {
+  const map = { 0:"R", 1:"♭9", 2:"9", 3:"♭3", 4:"3", 5:"11", 6:"♭5", 7:"5", 8:"♯5", 9:"6", 10:"♭7", 11:"7" };
+  return map[((semis % 12) + 12) % 12] || "";
+}
+
+// Moveable shapes by chord quality+type abbrev. Each shape is an array of 6
+// entries (low E → high e): null = muted, 0..n = fret offset from the shape's
+// root fret. baseRootString = which string the root sits on (for transposing).
+// rootStringNote = the open note we anchor to when finding the root fret.
+const SHAPE_LIBRARY = {
+  // quality/abbrev : [ {name, rootString, frets:[low..high]} ]
+  "":     [ // major (E-shape, A-shape, open-ish)
+    { name:"E-shape", rootString:0, frets:[0,2,2,1,0,0] },
+    { name:"A-shape", rootString:1, frets:[null,0,2,2,2,0] },
+    { name:"D-shape", rootString:2, frets:[null,null,0,2,3,2] },
+    { name:"C-shape", rootString:1, frets:[null,3,2,0,1,0] },
+  ],
+  "m":    [
+    { name:"Em-shape", rootString:0, frets:[0,2,2,0,0,0] },
+    { name:"Am-shape", rootString:1, frets:[null,0,2,2,1,0] },
+    { name:"Dm-shape", rootString:2, frets:[null,null,0,2,3,1] },
+  ],
+  "7":    [
+    { name:"E7-shape", rootString:0, frets:[0,2,0,1,0,0] },
+    { name:"A7-shape", rootString:1, frets:[null,0,2,0,2,0] },
+  ],
+  "maj7": [
+    { name:"Emaj7-shape", rootString:0, frets:[0,2,1,1,0,0] },
+    { name:"Amaj7-shape", rootString:1, frets:[null,0,2,1,2,0] },
+  ],
+  "m7":   [
+    { name:"Em7-shape", rootString:0, frets:[0,2,0,0,0,0] },
+    { name:"Am7-shape", rootString:1, frets:[null,0,2,0,1,0] },
+  ],
+  "m7b5": [
+    { name:"Am7♭5-shape", rootString:1, frets:[null,0,1,0,1,null] },
+  ],
+  "dim":  [
+    { name:"dim-shape", rootString:1, frets:[null,0,1,2,1,null] },
+  ],
+  "dim7": [
+    { name:"dim7-shape", rootString:1, frets:[null,0,1,0,1,null] },
+  ],
+  "aug":  [
+    { name:"aug-shape", rootString:0, frets:[0,3,2,1,1,0] },
+  ],
+  "sus2": [
+    { name:"Asus2-shape", rootString:1, frets:[null,0,2,2,0,0] },
+    { name:"Dsus2-shape", rootString:2, frets:[null,null,0,2,3,0] },
+  ],
+  "sus4": [
+    { name:"Asus4-shape", rootString:1, frets:[null,0,2,2,3,0] },
+    { name:"Dsus4-shape", rootString:2, frets:[null,null,0,2,3,3] },
+    { name:"Esus4-shape", rootString:0, frets:[0,2,2,2,0,0] },
+  ],
+  "6":    [
+    { name:"E6-shape", rootString:0, frets:[0,2,2,1,2,0] },
+    { name:"A6-shape", rootString:1, frets:[null,0,2,2,2,2] },
+  ],
+  "m6":   [
+    { name:"Am6-shape", rootString:1, frets:[null,0,2,2,1,2] },
+  ],
+  "9":    [
+    { name:"E9-shape", rootString:0, frets:[0,2,0,1,0,2] },
+    { name:"A9-shape", rootString:1, frets:[null,0,2,1,2,2] },
+  ],
+  "maj9": [
+    { name:"maj9-shape", rootString:1, frets:[null,0,2,1,2,2] },
+  ],
+  "m9":   [
+    { name:"m9-shape", rootString:1, frets:[null,0,2,0,1,2] },
+  ],
+  "add9": [
+    { name:"add9-shape", rootString:1, frets:[null,0,2,4,2,0] },
+  ],
+  "madd9":[
+    { name:"madd9-shape", rootString:1, frets:[null,0,2,4,1,0] },
+  ],
+  "5":    [ // power chord
+    { name:"E5-shape", rootString:0, frets:[0,2,2,null,null,null] },
+    { name:"A5-shape", rootString:1, frets:[null,0,2,2,null,null] },
+    { name:"D5-shape", rootString:2, frets:[null,null,0,2,3,null] },
+  ],
+  "mMaj7":[
+    { name:"mMaj7-shape", rootString:1, frets:[null,0,2,1,1,0] },
+  ],
+  "aug7": [
+    { name:"aug7-shape", rootString:0, frets:[0,2,0,1,1,null] },
+  ],
+};
+
+// Find the fret on a given string index (standard tuning) where the root sits
+function rootFretOnString(stringIdx, rootPC) {
+  const openPC = noteIndex(STD_TUNING[stringIdx]);
+  return ((rootPC - openPC) % 12 + 12) % 12;
+}
+
+function isStandardTuning(tuning) {
+  return tuning.length === 6 && tuning.every((n,i)=> noteIndex(n) === noteIndex(STD_TUNING[i]));
+}
+
+// Build voicings from the shape library (standard tuning)
+function shapeVoicings(chord, opts = {}) {
+  const { nearFret = null } = opts;
+  const shapes = SHAPE_LIBRARY[chord.type.abbrev];
+  if (!shapes) return null; // no library entry → caller falls back
+  const rootPC = noteIndex(chord.root);
+  const out = [];
+
+  shapes.forEach(shape => {
+    const baseFret = rootFretOnString(shape.rootString, rootPC);
+    // The shape's root sits at frets[rootString]; compute the transpose so that
+    // string lands on baseFret. Most shapes have rootString fret = 0 (barre at root).
+    const shapeRootOffset = shape.frets[shape.rootString] ?? 0;
+    const transpose = baseFret - shapeRootOffset;
+    // Also offer the octave-up version for higher positions
+    [0, 12].forEach(octave => {
+      const t = transpose + octave;
+      if (t < 0 || t > FRETS - 4) return;
+      const frets = {};
+      const muted = [];
+      let valid = true;
+      shape.frets.forEach((rel, s) => {
+        if (rel === null) { muted.push(s); return; }
+        const f = rel + t;
+        if (f < 0 || f > FRETS) { valid = false; return; }
+        frets[s] = f;
+      });
+      if (!valid || Object.keys(frets).length < 2) return;
+      const frettedVals = Object.values(frets).filter(f=>f>0);
+      const minFret = frettedVals.length ? Math.min(...frettedVals) : 0;
+      const maxFret = frettedVals.length ? Math.max(...frettedVals) : 0;
+      const span = maxFret - minFret;
+      if (span > 4) return; // unplayable stretch
+      let score = minFret * 0.5 + span - Object.keys(frets).length * 0.3;
+      if (nearFret != null) score += Math.abs(minFret - nearFret) * 1.3;
+      out.push({ frets, muted, minFret, span, score, name: shape.name, root: chord.root, rootPC });
+    });
+  });
+
+  // Dedup + sort
+  const seen = new Set(); const uniq = [];
+  out.sort((a,b)=>a.score-b.score);
+  for (const v of out) {
+    const sig = Object.entries(v.frets).map(([s,f])=>`${s}:${f}`).join(",");
+    if (seen.has(sig)) continue; seen.add(sig); uniq.push(v);
+    if (uniq.length >= 6) break;
+  }
+  return uniq.length ? uniq : null;
+}
+
+// Algorithmic fallback for non-standard tunings — stricter than before:
+// no duplicate octaves of the same pitch class beyond what's needed, root in bass.
+function algoVoicings(chord, tuning, opts = {}) {
+  const { nearFret = null, maxSpan = 4 } = opts;
+  const chordPCs = chord.type.intervals.map(iv => noteIndex(addSemi(chord.root, iv)));
+  const rootPC = noteIndex(chord.root);
+  const numStrings = tuning.length;
+  const stringOptions = tuning.map(openNote => {
+    const o = [];
+    for (let fret = 0; fret <= FRETS; fret++) {
+      const pc = noteIndex(addSemi(openNote, fret));
+      if (chordPCs.includes(pc)) o.push({ fret, pc });
+    }
+    return o;
+  });
+
+  const voicings = [];
+  for (let base = 0; base <= FRETS - 2; base++) {
+    const chosen = {}; const pcsCovered = new Set(); const pcCount = {};
+    let lowestRootString = -1;
+    for (let s = 0; s < numStrings; s++) {
+      const cands = stringOptions[s].filter(o => (o.fret === 0) || (o.fret >= base && o.fret <= base + maxSpan));
+      if (cands.length === 0) continue;
+      cands.sort((a,b)=>Math.abs(a.fret-base)-Math.abs(b.fret-base));
+      const pick = cands[0];
+      // avoid more than 2 copies of any pitch class (kills octave stacking)
+      if ((pcCount[pick.pc]||0) >= 2) continue;
+      chosen[s] = pick.fret;
+      pcsCovered.add(pick.pc);
+      pcCount[pick.pc] = (pcCount[pick.pc]||0)+1;
+      if (pick.pc === rootPC && lowestRootString === -1) lowestRootString = s;
+    }
+    if (!chordPCs.every(pc => pcsCovered.has(pc)) || lowestRootString === -1) continue;
+    const usedStrings = Object.keys(chosen).map(Number).sort((a,b)=>a-b);
+    if (usedStrings.length < Math.min(4, chordPCs.length + 1)) continue;
+    const muted = [];
+    for (let s=0;s<numStrings;s++) if (!(s in chosen)) muted.push(s);
+    const frettedVals = usedStrings.map(s=>chosen[s]).filter(f=>f>0);
+    const minFret = frettedVals.length ? Math.min(...frettedVals) : 0;
+    const span = frettedVals.length ? Math.max(...frettedVals)-minFret : 0;
+    const openCount = usedStrings.filter(s=>chosen[s]===0).length;
+    let score = span*2 + minFret*0.5 - openCount*1.2 - usedStrings.length*0.4;
+    if (nearFret != null) score += Math.abs(minFret - nearFret)*1.2;
+    voicings.push({ frets:{...chosen}, muted, span, minFret, score, name:"position", root:chord.root, rootPC });
+  }
+  const seen = new Set(); const uniq = [];
+  voicings.sort((a,b)=>a.score-b.score);
+  for (const v of voicings) {
+    const sig = Object.entries(v.frets).map(([s,f])=>`${s}:${f}`).join(",");
+    if (seen.has(sig)) continue; seen.add(sig); uniq.push(v);
+    if (uniq.length >= 6) break;
+  }
+  return uniq;
+}
+
+function generateVoicings(chord, tuning, opts = {}) {
+  if (!chord) return [];
+  if (isStandardTuning(tuning)) {
+    const lib = shapeVoicings(chord, opts);
+    if (lib && lib.length) return lib;
+  }
+  return algoVoicings(chord, tuning, opts);
+}
+
+// Annotate a voicing with interval name per string, given the tuning
+function voicingIntervals(voicing, tuning) {
+  if (!voicing) return {};
+  const out = {};
+  Object.entries(voicing.frets).forEach(([s, f]) => {
+    const pc = noteIndex(addSemi(tuning[s], f));
+    const semis = (pc - voicing.rootPC + 12) % 12;
+    out[s] = intervalName(semis);
+  });
+  return out;
+}
+
+// Convert a voicing's {stringIdx:fret} into the selectedFrets map shape
+function voicingToSelected(voicing) {
+  const sel = {};
+  if (!voicing) return sel;
+  Object.entries(voicing.frets).forEach(([s, f]) => { sel[`${s}-${f}`] = true; });
+  return sel;
+}
+
+// ═══════════════════════════════════════════════════════════
 // STORAGE
 // ═══════════════════════════════════════════════════════════
 
@@ -379,7 +625,9 @@ Current key: ${key}
 Recent chords: ${recent || "none"}
 Writer style: ${style}
 
-Suggest 2-3 specific next chords that would be typical for ${genre} in this context. Format: just list the chords with a brief reason each. No preamble.`;
+Suggest 2-3 specific next chords that fit ${genre} in this context, taking the writer's style and recent chords into account.
+
+IMPORTANT FORMAT: Start your reply with a line beginning "CHORDS:" listing just the chord symbols separated by commas (e.g. "CHORDS: Am, F, C, G"). Then on following lines give a brief reason for each. Keep it short.`;
 
   const resp = await fetch("/api/claude", {
     method:"POST",
@@ -389,6 +637,71 @@ Suggest 2-3 specific next chords that would be typical for ${genre} in this cont
   const data = await resp.json();
   if (!resp.ok) throw new Error(data?.error || "AI request failed");
   return data.text || "Could not generate suggestion.";
+}
+
+// ═══════════════════════════════════════════════════════════
+// CHORD DIAGRAM — vertical 6-string chart with R/3/5 interval dots
+// ═══════════════════════════════════════════════════════════
+function ChordDiagram({ voicing, tuning, chord, color }) {
+  if (!voicing || !chord) return null;
+  const numStrings = tuning.length;
+  const frettedVals = Object.values(voicing.frets).filter(f=>f>0);
+  const minF = frettedVals.length ? Math.min(...frettedVals) : 1;
+  const maxF = frettedVals.length ? Math.max(...frettedVals) : 1;
+  // Window of 4-5 frets starting at minF (or 1 if open chord region)
+  const startFret = minF <= 2 ? 1 : minF;
+  const numFrets = Math.max(4, maxF - startFret + 1);
+  const ivMap = voicingIntervals(voicing, tuning);
+
+  const W = 132, H = 168;
+  const padX = 20, padTop = 26, padBottom = 14;
+  const gridW = W - padX*2, gridH = H - padTop - padBottom;
+  const colGap = gridW / (numStrings - 1);
+  const rowGap = gridH / numFrets;
+
+  return (
+    <svg width={W} height={H} style={{flexShrink:0}}>
+      {/* Chord name */}
+      <text x={W/2} y={14} textAnchor="middle" fontSize="13" fontWeight="700" fill={color} fontFamily="'DM Mono',monospace">{chord.root}{chord.type.abbrev||""}</text>
+      {/* Nut or position marker */}
+      {startFret===1
+        ? <rect x={padX-1} y={padTop-3} width={gridW+2} height={4} fill="#F7F0E2" rx={1}/>
+        : <text x={padX-10} y={padTop+rowGap*0.7} textAnchor="end" fontSize="9" fill="#B89456" fontFamily="'DM Mono',monospace">{startFret}fr</text>}
+      {/* Strings (vertical lines) */}
+      {Array.from({length:numStrings},(_,i)=>(
+        <line key={i} x1={padX+i*colGap} y1={padTop} x2={padX+i*colGap} y2={padTop+gridH} stroke="#6A4525" strokeWidth={1}/>
+      ))}
+      {/* Frets (horizontal lines) */}
+      {Array.from({length:numFrets+1},(_,i)=>(
+        <line key={i} x1={padX} y1={padTop+i*rowGap} x2={padX+gridW} y2={padTop+i*rowGap} stroke="#6A4525" strokeWidth={1}/>
+      ))}
+      {/* Open/muted markers above nut */}
+      {Array.from({length:numStrings},(_,s)=>{
+        // display order: low string (idx 0) on the LEFT
+        const x = padX + s*colGap;
+        if (voicing.muted?.includes(s)) return <text key={s} x={x} y={padTop-8} textAnchor="middle" fontSize="11" fill="#FF8A8A" fontWeight="700">✕</text>;
+        if (voicing.frets[s]===0) return <circle key={s} cx={x} cy={padTop-10} r={4} fill="none" stroke="#5FE3D8" strokeWidth={1.5}/>;
+        return null;
+      })}
+      {/* Fretted dots */}
+      {Object.entries(voicing.frets).map(([s,f])=>{
+        if (f===0) return null;
+        const si = Number(s);
+        const x = padX + si*colGap;
+        const rowPos = f - startFret + 0.5;
+        if (rowPos < 0 || rowPos > numFrets) return null;
+        const y = padTop + rowPos*rowGap;
+        const iv = ivMap[si] || "";
+        const isRoot = iv === "R";
+        return (
+          <g key={s}>
+            <circle cx={x} cy={y} r={9} fill={isRoot?color:"#241A0D"} stroke={color} strokeWidth={1.5}/>
+            <text x={x} y={y+3} textAnchor="middle" fontSize="8" fontWeight="700" fill={isRoot?"#0B0804":color} fontFamily="'DM Mono',monospace">{iv}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -428,7 +741,19 @@ export default function SongwriterWorkbench() {
   // Tuning gate — user must pick a tuning before entering the app
   const [started, setStarted] = useState(false);
 
+  // Voicing display: which chord is shown on the board, its voicing options, and index
+  const [voicingChord, setVoicingChord] = useState(null);   // chord object currently displayed
+  const [voicingList, setVoicingList] = useState([]);        // array of voicing options
+  const [voicingIdx, setVoicingIdx] = useState(0);
+  const [voicingMode, setVoicingMode] = useState("near");    // "near" | "easy"
+  const [recentFret, setRecentFret] = useState(null);        // center of recent playing position
+
   const tuning = customTuning || TUNINGS[tuningKey];
+
+  // Current displayed voicing + its interval labels and muted strings
+  const currentVoicing = voicingList[voicingIdx] || null;
+  const voicingIntervalMap = useMemo(()=> currentVoicing ? voicingIntervals(currentVoicing, tuning) : {}, [currentVoicing, tuning]);
+  const mutedStrings = currentVoicing?.muted || [];
 
   const showToast = (msg) => { setToast(msg); setTimeout(()=>setToast(null), 2500); };
 
@@ -482,6 +807,58 @@ export default function SongwriterWorkbench() {
     setTextInput("");
     setTextChord(null);
   },[activeKC]);
+
+  // Show a chord's voicing on the fretboard. Clears the board first,
+  // generates voicings considering recent hand position (in "near" mode),
+  // and selects the best one.
+  const showChordOnFretboard = useCallback((chord) => {
+    if (!chord) return;
+    // Determine target fret: in "near" mode, aim for recent playing region
+    const near = voicingMode === "near" ? recentFret : null;
+    const list = generateVoicings(chord, tuning, { nearFret: near });
+    if (list.length === 0) {
+      // Fallback: just light up the root note positions
+      showToast("No clean voicing found — showing chord tones");
+      const sel = {};
+      tuning.forEach((on, s) => {
+        for (let f = 0; f <= 5; f++) {
+          if (noteIndex(addSemi(on, f)) === noteIndex(chord.root)) { sel[`${s}-${f}`] = true; break; }
+        }
+      });
+      setSelectedFrets(sel);
+      setVoicingChord(chord); setVoicingList([]); setVoicingIdx(0);
+      return;
+    }
+    setVoicingChord(chord);
+    setVoicingList(list);
+    setVoicingIdx(0);
+    setSelectedFrets(voicingToSelected(list[0]));
+    setInputMode("fretboard");
+    // Update recent fret position to this voicing's center
+    if (list[0].minFret != null) setRecentFret(list[0].minFret);
+  }, [tuning, voicingMode, recentFret]);
+
+  const cycleVoicing = useCallback(() => {
+    if (voicingList.length < 2) return;
+    const next = (voicingIdx + 1) % voicingList.length;
+    setVoicingIdx(next);
+    setSelectedFrets(voicingToSelected(voicingList[next]));
+    if (voicingList[next].minFret != null) setRecentFret(voicingList[next].minFret);
+  }, [voicingList, voicingIdx]);
+
+  // When voicing mode toggles, regenerate for the currently displayed chord
+  const toggleVoicingMode = useCallback(() => {
+    const mode = voicingMode === "near" ? "easy" : "near";
+    setVoicingMode(mode);
+    if (voicingChord) {
+      const near = mode === "near" ? recentFret : null;
+      const list = generateVoicings(voicingChord, tuning, { nearFret: near });
+      if (list.length > 0) {
+        setVoicingList(list); setVoicingIdx(0);
+        setSelectedFrets(voicingToSelected(list[0]));
+      }
+    }
+  }, [voicingMode, voicingChord, tuning, recentFret]);
 
   const handleTextInput = (val) => {
     setTextInput(val);
@@ -626,9 +1003,39 @@ export default function SongwriterWorkbench() {
                 <div style={{width:16,height:16,border:"2px solid #8A6E40",borderTopColor:"#E8C661",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
                 Asking Claude...
               </div>
-            ) : (
-              <div style={{fontSize:13,lineHeight:1.7,color:"#DCCBA8",whiteSpace:"pre-wrap"}}>{aiModal.text}</div>
-            )}
+            ) : (() => {
+              // Parse a "CHORDS: Am, F, C" line into clickable chips
+              const chordLine = aiModal.text.match(/CHORDS?:\s*(.+)/i);
+              let chips = [];
+              let bodyText = aiModal.text;
+              if (chordLine) {
+                chips = chordLine[1].split(/[,/]/).map(s=>s.trim()).filter(Boolean)
+                  .map(name=>({ name, chord: parseChordName(name) }))
+                  .filter(c=>c.chord);
+                bodyText = aiModal.text.replace(/CHORDS?:\s*.+/i, "").trim();
+              }
+              return (
+                <div>
+                  {chips.length>0 && (
+                    <div style={{marginBottom:14}}>
+                      <div className="label" style={{marginBottom:8}}>Tap a chord to see it on the fretboard</div>
+                      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                        {chips.map((c,i)=>{
+                          const col=qc(c.chord.type.quality);
+                          return (
+                            <div key={i} style={{display:"flex",flexDirection:"column",gap:3,alignItems:"center"}}>
+                              <button className="btn" onClick={()=>{showChordOnFretboard(c.chord);setAiModal(null);}} style={{background:"#241A0D",border:`1px solid ${col}55`,color:col,padding:"6px 12px",borderRadius:6,fontSize:15,fontWeight:700,fontFamily:"'DM Mono',monospace"}}>{c.name}</button>
+                              <button className="btn" onClick={()=>addToProgression(c.chord,activeKC)} style={{background:"transparent",border:"none",color:"#A98A52",fontSize:9,padding:0}}>+ add</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  <div style={{fontSize:13,lineHeight:1.7,color:"#DCCBA8",whiteSpace:"pre-wrap"}}>{bodyText}</div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -709,6 +1116,42 @@ export default function SongwriterWorkbench() {
         </>}
       </div>
 
+      {/* VOICING BAR */}
+      {inputMode==="fretboard" && voicingChord && (
+        <div style={{background:"#0D0905",borderBottom:"1px solid #241A0D",padding:"10px 16px",display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+          {/* Diagram */}
+          {currentVoicing && (
+            <div style={{background:"#0B0804",border:"1px solid #241A0D",borderRadius:8,padding:"4px 6px"}}>
+              <ChordDiagram voicing={currentVoicing} tuning={tuning} chord={voicingChord} color={qc(voicingChord.type.quality)} />
+            </div>
+          )}
+          <div style={{display:"flex",flexDirection:"column",gap:8,flex:1,minWidth:220}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <span className="label">Voicing for</span>
+              <span style={{fontSize:18,fontWeight:700,fontFamily:"'DM Mono',monospace",color:qc(voicingChord.type.quality)}}>{voicingChord.root}{voicingChord.type.abbrev||""}</span>
+              {currentVoicing?.name && currentVoicing.name!=="position" && (
+                <span style={{fontSize:10,color:"#C9A468",fontFamily:"'DM Mono',monospace",background:"#241A0D",padding:"2px 7px",borderRadius:3}}>{currentVoicing.name}</span>
+              )}
+              {voicingList.length>0 && (
+                <span style={{fontSize:10,color:"#B89456",fontFamily:"'DM Mono',monospace"}}>
+                  {voicingIdx+1}/{voicingList.length}{currentVoicing?.minFret>0?` · fret ${currentVoicing.minFret}`:" · open"}
+                </span>
+              )}
+            </div>
+            <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+              <div style={{display:"flex",border:"1px solid #4A3820",borderRadius:5,overflow:"hidden"}}>
+                <button className="btn" onClick={()=>{if(voicingMode!=="near")toggleVoicingMode();}} style={{background:voicingMode==="near"?"#E8C661":"transparent",color:voicingMode==="near"?"#0B0804":"#C9A468",padding:"3px 10px",fontWeight:600}}>Near hand</button>
+                <button className="btn" onClick={()=>{if(voicingMode!=="easy")toggleVoicingMode();}} style={{background:voicingMode==="easy"?"#E8C661":"transparent",color:voicingMode==="easy"?"#0B0804":"#C9A468",padding:"3px 10px",fontWeight:600}}>Easy</button>
+              </div>
+              {voicingList.length>1 && (
+                <button className="btn" onClick={cycleVoicing} style={{background:"#241A0D",border:"1px solid #4A3820",color:"#E8C661",padding:"3px 12px",borderRadius:5,fontWeight:600}}>⟳ Alternate shape</button>
+              )}
+              <button className="btn" onClick={()=>addToProgression(voicingChord,activeKC)} style={{background:"#E8C661",color:"#0B0804",padding:"3px 12px",borderRadius:5,fontWeight:700}}>+ Add to progression</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* FRETBOARD */}
       {inputMode==="fretboard"&&(
         <div style={{overflowX:"auto",padding:"14px 16px 6px",background:"#090604",borderBottom:"1px solid #241A0D"}}>
@@ -720,18 +1163,26 @@ export default function SongwriterWorkbench() {
               const on = tuning[si];
               return (
               <div key={si} style={{display:"flex",alignItems:"center",marginBottom:1}}>
-                <div style={{width:40,textAlign:"right",paddingRight:7,fontSize:10,fontFamily:"'DM Mono',monospace",color:"#E8C661",fontWeight:500,flexShrink:0}}>{on}</div>
+                <div style={{width:40,textAlign:"right",paddingRight:7,fontSize:10,fontFamily:"'DM Mono',monospace",color:"#E8C661",fontWeight:500,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"flex-end",gap:4}}>
+                  {currentVoicing && (
+                    mutedStrings.includes(si)
+                      ? <span style={{color:"#FF8A8A",fontWeight:700}}>✕</span>
+                      : (currentVoicing.frets[si]===0 ? <span style={{color:"#5FE3D8",fontWeight:700}}>○</span> : null)
+                  )}
+                  <span>{on}</span>
+                </div>
                 {Array.from({length:FRETS+1},(_,fr)=>{
                   const note=addSemi(on,fr), k=`${si}-${fr}`, isSel=!!selectedFrets[k];
                   const thick=[3,2.5,2,1.5,1,0.8][si]||1;
                   const inlay=(INLAY.has(fr)&&si===2)||(DBL_INLAY.has(fr)&&(si===1||si===4));
+                  const ivLabel = isSel ? voicingIntervalMap[si] : null;
                   return (
-                    <div key={fr} className="fc" onClick={()=>setSelectedFrets(p=>({...p,[k]:!p[k]}))} style={{width:fr===0?36:50,height:30,flexShrink:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center"}}>
+                    <div key={fr} className="fc" onClick={()=>{setSelectedFrets(p=>({...p,[k]:!p[k]}));setVoicingChord(null);setVoicingList([]);}} style={{width:fr===0?36:50,height:30,flexShrink:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center"}}>
                       {fr===0?<div style={{position:"absolute",right:0,top:0,bottom:0,width:4,background:"linear-gradient(180deg,#D8C49E,#F7F0E2,#D8C49E)",zIndex:1}}/>:<div style={{position:"absolute",left:0,top:0,bottom:0,width:2,background:"linear-gradient(180deg,#B89456,#E8C661,#B89456)",borderRadius:1,zIndex:1}}/>}
                       <div style={{position:"absolute",left:0,right:0,height:thick,background:"linear-gradient(90deg,#8A6E40,#6A4525,#8A6E40)",zIndex:0}}/>
                       {inlay&&!isSel&&<div style={{position:"absolute",width:6,height:6,borderRadius:"50%",background:"#181008",border:"1px solid #221508",zIndex:2,pointerEvents:"none"}}/>}
                       <div className="dn" style={{width:isSel?24:18,height:isSel?24:18,borderRadius:"50%",background:isSel?cc:"rgba(255,255,255,0.025)",border:isSel?`2px solid ${cc}`:"1px solid rgba(255,255,255,0.06)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:3,position:"relative",transition:"all 0.1s",boxShadow:isSel?`0 0 8px ${cc}55`:"none"}}>
-                        <span style={{fontSize:7,fontFamily:"'DM Mono',monospace",color:isSel?"#0B0804":"rgba(237,228,208,0.18)",fontWeight:isSel?700:400}}>{note}</span>
+                        <span style={{fontSize:ivLabel?8:7,fontFamily:"'DM Mono',monospace",color:isSel?"#0B0804":"rgba(237,228,208,0.18)",fontWeight:isSel?700:400}}>{ivLabel || note}</span>
                       </div>
                     </div>
                   );
@@ -748,7 +1199,7 @@ export default function SongwriterWorkbench() {
         {[...new Set(workingNotes)].map(n=><div key={n} style={{background:"#1C1409",border:`1px solid ${cc}44`,color:cc,padding:"2px 8px",borderRadius:20,fontSize:11,fontFamily:"'DM Mono',monospace",fontWeight:500}}>{n}</div>)}
         {workingNotes.length===0&&<span style={{fontSize:11,color:"#7A6038",fontStyle:"italic"}}>{inputMode==="fretboard"?"Tap frets to build a chord":"Type a chord name"}</span>}
         <div style={{marginLeft:"auto",display:"flex",gap:5}}>
-          {inputMode==="fretboard"&&<button className="btn" onClick={()=>setSelectedFrets({})} style={{background:"transparent",border:"1px solid #241A0D",color:"#8A6E40",padding:"2px 8px",borderRadius:4}}>Clear</button>}
+          {inputMode==="fretboard"&&<button className="btn" onClick={()=>{setSelectedFrets({});setVoicingChord(null);setVoicingList([]);}} style={{background:"transparent",border:"1px solid #241A0D",color:"#8A6E40",padding:"2px 8px",borderRadius:4}}>Clear</button>}
           <button className="btn" onClick={()=>addToProgression(workingChord)} disabled={!workingChord} style={{background:workingChord?"#E8C661":"#1C1409",color:workingChord?"#0B0804":"#7A6038",padding:"2px 12px",borderRadius:4,fontWeight:700,transition:"all 0.15s"}}>Add →</button>
         </div>
       </div>
@@ -863,9 +1314,13 @@ export default function SongwriterWorkbench() {
                       const col=qc(s.type.quality);
                       return(
                         <div key={i} style={{background:"#171108",border:`1px solid ${col}30`,borderRadius:8,padding:"10px 8px",display:"flex",flexDirection:"column",gap:4}}>
-                          <div className="pill" onClick={()=>addToProgression(s,activeKC)} style={{fontSize:18,fontWeight:700,fontFamily:"'DM Mono',monospace",color:col,lineHeight:1}}>{s.root}{s.type.abbrev||""}</div>
+                          <div className="pill" onClick={()=>showChordOnFretboard(s)} title="Show on fretboard" style={{fontSize:18,fontWeight:700,fontFamily:"'DM Mono',monospace",color:col,lineHeight:1}}>{s.root}{s.type.abbrev||""}</div>
                           <div style={{fontSize:8,color:"#5FE3D8",fontFamily:"'DM Mono',monospace"}}>{s.degree}</div>
-                          <button className="btn" onClick={()=>handleExplain(s,activeKC,`(${s.degree})`)} style={{background:"#241A0D",border:"1px solid #4A3820",color:"#A98A52",padding:"2px 0",borderRadius:3,marginTop:2,fontSize:9}}>✨ Explain</button>
+                          <div style={{display:"flex",gap:3,marginTop:2}}>
+                            <button className="btn" onClick={()=>showChordOnFretboard(s)} style={{flex:1,background:"#241A0D",border:`1px solid ${col}44`,color:col,padding:"2px 0",borderRadius:3,fontSize:9}}>♪ Show</button>
+                            <button className="btn" onClick={()=>addToProgression(s,activeKC)} style={{flex:1,background:"#241A0D",border:"1px solid #4A3820",color:"#A98A52",padding:"2px 0",borderRadius:3,fontSize:9}}>+ Add</button>
+                          </div>
+                          <button className="btn" onClick={()=>handleExplain(s,activeKC,`(${s.degree})`)} style={{background:"#241A0D",border:"1px solid #4A3820",color:"#A98A52",padding:"2px 0",borderRadius:3,fontSize:9}}>✨ Explain</button>
                         </div>
                       );
                     })}
@@ -887,10 +1342,14 @@ export default function SongwriterWorkbench() {
                       const bias=genreData.bias[dc.type.quality]||0;
                       return(
                         <div key={i} style={{background:"#171108",border:`1px solid ${col}${bias>1?"55":"22"}`,borderRadius:8,padding:"9px 8px",display:"flex",flexDirection:"column",gap:3}}>
-                          <div className="pill" onClick={()=>addToProgression(dc,activeKC)} style={{fontSize:17,fontWeight:700,fontFamily:"'DM Mono',monospace",color:col,lineHeight:1}}>{dc.root}{dc.type.abbrev}</div>
+                          <div className="pill" onClick={()=>showChordOnFretboard(dc)} title="Show on fretboard" style={{fontSize:17,fontWeight:700,fontFamily:"'DM Mono',monospace",color:col,lineHeight:1}}>{dc.root}{dc.type.abbrev}</div>
                           <div style={{fontSize:8,color:"#5FE3D8",fontFamily:"'DM Mono',monospace"}}>{dc.degree}</div>
                           {bias>1&&<div style={{fontSize:7,color:"#E8C661",fontFamily:"'DM Mono',monospace"}}>★ {genre}</div>}
-                          <button className="btn" onClick={()=>handleExplain(dc,activeKC,`(${dc.degree})`)} style={{background:"#241A0D",border:"1px solid #4A3820",color:"#A98A52",padding:"2px 0",borderRadius:3,marginTop:2,fontSize:9}}>✨ Explain</button>
+                          <div style={{display:"flex",gap:3,marginTop:2}}>
+                            <button className="btn" onClick={()=>showChordOnFretboard(dc)} style={{flex:1,background:"#241A0D",border:`1px solid ${col}44`,color:col,padding:"2px 0",borderRadius:3,fontSize:9}}>♪ Show</button>
+                            <button className="btn" onClick={()=>addToProgression(dc,activeKC)} style={{flex:1,background:"#241A0D",border:"1px solid #4A3820",color:"#A98A52",padding:"2px 0",borderRadius:3,fontSize:9}}>+ Add</button>
+                          </div>
+                          <button className="btn" onClick={()=>handleExplain(dc,activeKC,`(${dc.degree})`)} style={{background:"#241A0D",border:"1px solid #4A3820",color:"#A98A52",padding:"2px 0",borderRadius:3,fontSize:9}}>✨ Explain</button>
                         </div>
                       );
                     })}
